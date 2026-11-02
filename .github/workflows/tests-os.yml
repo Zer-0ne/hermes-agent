@@ -111,26 +111,36 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
 
-      - name: PROBE PowerShell env bisect (diagnostic, do not merge)
+      - name: PROBE PowerShell env bisect from Python (diagnostic, do not merge)
         if: runner.os == 'Windows' && runner.arch == 'ARM64'
-        shell: bash
+        shell: powershell
         run: |
-          t() { local s=$(date +%s%N); "$@" > "$RUNNER_TEMP/probe.out" 2>&1; local rc=$?; echo "PROBE $LABEL rc=$rc $(( ($(date +%s%N) - s) / 1000000 ))ms $(tr -d '\r' < "$RUNNER_TEMP/probe.out" | tr '\n' '|' | cut -c1-200)"; }
-          PS=(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command)
-          CMD='Get-ChildItem . | Out-Null'
-          WINPATH='C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0'
-          echo "PROBE path-entries $(echo "$PATH" | tr ':' '\n' | wc -l)"
-          LABEL=bash-baseline t "${PS[@]}" "$CMD"
-          LABEL=winpath PATH="/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem:/c/Windows/System32/WindowsPowerShell/v1.0" t "${PS[@]}" "$CMD"
-          LABEL=pathext PATHEXT='.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL' t "${PS[@]}" "$CMD"
-          env | cut -d= -f1 | sort > "$RUNNER_TEMP/bash-env.txt"
-          powershell.exe -NoProfile -Command 'Get-ChildItem env: | ForEach-Object Name' | tr -d '\r' | sort > "$RUNNER_TEMP/ps-env.txt"
-          comm -3 "$RUNNER_TEMP/bash-env.txt" "$RUNNER_TEMP/ps-env.txt" | tr -d '\t' | tr '\n' ' ' | sed 's/^/PROBE env-diff: /'; echo
-          LABEL=via-ps-parent t powershell.exe -NoProfile -Command "& powershell.exe -NoProfile -NonInteractive -Command '$CMD'"
-          LABEL=via-cmd t cmd.exe //c "powershell.exe -NoProfile -NonInteractive -Command \"$CMD\""
-          LABEL=no-MSYS-vars t env -u MSYSTEM -u MSYS -u TERM -u SHELL -u SHLVL -u PWD -u OLDPWD "${PS[@]}" "$CMD"
-          LABEL=no-TMP t env -u TMP -u TEMP "${PS[@]}" "$CMD"
-          LABEL=py-launch t "$(command -v python || echo python)" -c "import subprocess,time;t=time.time();subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command','$CMD']);print(round(time.time()-t,1))"
+          Write-Host "PROBE ProgramFiles modules: $((Get-ChildItem 'C:\Program Files\WindowsPowerShell\Modules' -Directory).Name -join ',')"
+          $probe = Join-Path $env:RUNNER_TEMP 'psprobe.py'
+          @'
+          import os, subprocess, sys, tempfile, time
+          base = dict(os.environ)
+          sysroot = base.get("SystemRoot", r"C:\Windows")
+          mini_path = ";".join([sysroot + r"\system32", sysroot, sysroot + r"\System32\Wbem", sysroot + r"\System32\WindowsPowerShell\v1.0"])
+          sys_mods = sysroot + r"\system32\WindowsPowerShell\v1.0\Modules"
+          shared = os.path.join(tempfile.gettempdir(), "shared-analysis-cache")
+          def run(label, env, cmd="Get-ChildItem . | Out-Null"):
+              t = time.time()
+              r = subprocess.run([sysroot + r"\System32\WindowsPowerShell\v1.0\powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd], env=env, capture_output=True, text=True)
+              print(f"PROBE {label} rc={r.returncode} {time.time() - t:.1f}s {(r.stdout + r.stderr).strip()[:160]!r}", flush=True)
+          print("PROBE path-entries", len(base["PATH"].split(";")), flush=True)
+          run("baseline#1", base); run("baseline#2", base)
+          run("mini-PATH#1", {**base, "PATH": mini_path}); run("mini-PATH#2", {**base, "PATH": mini_path})
+          run("sys-PSModulePath#1", {**base, "PSModulePath": sys_mods}); run("sys-PSModulePath#2", {**base, "PSModulePath": sys_mods})
+          run("both", {**base, "PATH": mini_path, "PSModulePath": sys_mods})
+          run("shared-cache#1", {**base, "PSModuleAnalysisCachePath": shared}); run("shared-cache#2", {**base, "PSModuleAnalysisCachePath": shared})
+          run("trace", base, "$t=[Diagnostics.Stopwatch]::StartNew(); Get-Command Get-ChildItem | Out-Null; 'gcm ' + $t.ElapsedMilliseconds; $t.Restart(); Get-ChildItem . | Out-Null; 'gci ' + $t.ElapsedMilliseconds")
+          run("timestamps", base, "(Get-Module -ListAvailable | Measure-Object).Count")
+          '@ -replace '(?m)^          ', '' | Set-Content -Encoding UTF8 $probe
+          $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if (-not $py) { $py = (Get-Command py).Source }
+          Write-Host "PROBE python=$py"
+          & $py $probe 2>&1 | Write-Host
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
