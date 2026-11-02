@@ -111,29 +111,28 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
 
-      - name: PROBE script-load cost (diagnostic, do not merge)
+      - name: PROBE fresh-profile PowerShell cost (diagnostic, do not merge)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          $src = Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'scripts\install.ps1')
-          function Probe($label) {
-            foreach ($shell in @('powershell', 'pwsh')) {
-              foreach ($kind in 'unique', 'unique', 'same') {
-                if ($kind -eq 'same') { $body = $script:last } else { $body = $src + "`n# " + [guid]::NewGuid().ToString('N') + "`n"; $script:last = $body }
-                $copy = Join-Path $env:RUNNER_TEMP ("probe-" + [guid]::NewGuid().ToString('N') + '.ps1')
-                Set-Content -Path $copy -Value $body -Encoding UTF8
-                $t = Measure-Command { & $shell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "`$ErrorActionPreference='Stop'; . '$copy'" | Out-Null }
-                Write-Host ("PROBE {0} {1} {2} {3:N1}s" -f $label, $shell, $kind, $t.TotalSeconds)
-              }
-            }
+          function Run($label, [hashtable]$extra) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'powershell.exe'
+            $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Command Get-ChildItem | Out-Null; exit 0"'
+            $psi.UseShellExecute = $false
+            foreach ($k in $extra.Keys) { $psi.EnvironmentVariables[$k] = $extra[$k] }
+            $t = [Diagnostics.Stopwatch]::StartNew(); $p = [Diagnostics.Process]::Start($psi); $p.WaitForExit(); $t.Stop()
+            Write-Host ("PROBE {0} {1:N1}s rc={2}" -f $label, $t.Elapsed.TotalSeconds, $p.ExitCode)
           }
-          Probe 'default'
-          Probe 'default-again'
-          try { Set-MpPreference -DisableScriptScanning $true -ErrorAction Stop; Write-Host "PROBE DisableScriptScanning=$((Get-MpPreference).DisableScriptScanning)" } catch { Write-Host "PROBE DisableScriptScanning refused: $($_.Exception.Message)" }
-          Probe 'scriptscan-off'
-          Set-MpPreference -DisableScriptScanning $false
-          try { Add-MpPreference -ExclusionProcess 'powershell.exe','pwsh.exe' -ErrorAction Stop; Write-Host 'PROBE process exclusion set' } catch { Write-Host "PROBE process exclusion refused: $($_.Exception.Message)" }
-          Probe 'procexcl-only'
+          function Fresh() { $d = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N')); New-Item -ItemType Directory $d | Out-Null; $d }
+          Run 'warm-up' @{}
+          Run 'same-env' @{}
+          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-USERPROFILE#$i" @{ USERPROFILE = $d; HOME = $d } }
+          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-LOCALAPPDATA#$i" @{ LOCALAPPDATA = $d } }
+          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-TEMP#$i" @{ TEMP = $d; TMP = $d } }
+          $shared = Fresh
+          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-all+shared-analysis-cache#$i" @{ USERPROFILE = $d; HOME = $d; LOCALAPPDATA = $d; TEMP = $d; TMP = $d; PSModuleAnalysisCachePath = (Join-Path $shared 'cache') } }
+          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-all#$i" @{ USERPROFILE = $d; HOME = $d; LOCALAPPDATA = $d; TEMP = $d; TMP = $d } }
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
