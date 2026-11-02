@@ -111,30 +111,26 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
 
-      - name: PROBE PowerShell launch cost from bash v2 (diagnostic, do not merge)
-        if: runner.os == 'Windows'
+      - name: PROBE PowerShell env bisect (diagnostic, do not merge)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
         shell: bash
         run: |
-          t() { local s=$(date +%s%N); "$@" > "$RUNNER_TEMP/probe.out" 2>&1; local rc=$?; echo "PROBE $LABEL rc=$rc $(( ($(date +%s%N) - s) / 1000000 ))ms $(tr -d '\r' < "$RUNNER_TEMP/probe.out" | tr '\n' '|' | cut -c1-300)"; }
-          PS='powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command'
-          CMD='Get-Command Get-ChildItem | Out-Null'
-          LABEL=effective-path t $PS '$env:PSModulePath'
-          LABEL=baseline t $PS "$CMD"
-          SYS='C:\Windows\system32\WindowsPowerShell\v1.0\Modules'
-          LABEL=sys-only#1 PSModulePath="$SYS" t $PS "$CMD"
-          LABEL=sys-only#2 PSModulePath="$SYS" t $PS "$CMD"
-          LABEL=sys-only-effective PSModulePath="$SYS" t $PS '$env:PSModulePath'
-          LABEL=no-az#1 PSModulePath="$(echo "$PSModulePath" | tr ';' '\n' | grep -vi 'Modules\\\\*az_\|SQL Server' | paste -sd';')" t $PS "$CMD"
-          LABEL=no-az-effective PSModulePath="$(echo "$PSModulePath" | tr ';' '\n' | grep -vi 'Modules\\\\*az_\|SQL Server' | paste -sd';')" t $PS '$env:PSModulePath'
-          LABEL=no-az#2 PSModulePath="$(echo "$PSModulePath" | tr ';' '\n' | grep -vi 'Modules\\\\*az_\|SQL Server' | paste -sd';')" t $PS "$CMD"
-          C="$(cygpath -w "$RUNNER_TEMP")\\ps-analysis-cache"
-          LABEL=cache-path#1 PSModuleAnalysisCachePath="$C" t $PS "$CMD"
-          ls -la "$RUNNER_TEMP" | grep -i analysis | sed 's/^/PROBE cache-file: /'
-          LABEL=cache-path#2 PSModuleAnalysisCachePath="$C" t $PS "$CMD"
-          LABEL=explicit-import t $PS 'Import-Module Microsoft.PowerShell.Management; Get-ChildItem . | Out-Null'
-          LABEL=cmdlet-only t $PS 'Get-ChildItem . | Out-Null'
-          LABEL=pwsh t pwsh.exe -NoProfile -NonInteractive -Command "$CMD"
-          LABEL=pwsh#2 t pwsh.exe -NoProfile -NonInteractive -Command "$CMD"
+          t() { local s=$(date +%s%N); "$@" > "$RUNNER_TEMP/probe.out" 2>&1; local rc=$?; echo "PROBE $LABEL rc=$rc $(( ($(date +%s%N) - s) / 1000000 ))ms $(tr -d '\r' < "$RUNNER_TEMP/probe.out" | tr '\n' '|' | cut -c1-200)"; }
+          PS=(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command)
+          CMD='Get-ChildItem . | Out-Null'
+          WINPATH='C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0'
+          echo "PROBE path-entries $(echo "$PATH" | tr ':' '\n' | wc -l)"
+          LABEL=bash-baseline t "${PS[@]}" "$CMD"
+          LABEL=winpath PATH="/c/Windows/system32:/c/Windows:/c/Windows/System32/Wbem:/c/Windows/System32/WindowsPowerShell/v1.0" t "${PS[@]}" "$CMD"
+          LABEL=pathext PATHEXT='.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL' t "${PS[@]}" "$CMD"
+          env | cut -d= -f1 | sort > "$RUNNER_TEMP/bash-env.txt"
+          powershell.exe -NoProfile -Command 'Get-ChildItem env: | ForEach-Object Name' | tr -d '\r' | sort > "$RUNNER_TEMP/ps-env.txt"
+          comm -3 "$RUNNER_TEMP/bash-env.txt" "$RUNNER_TEMP/ps-env.txt" | tr -d '\t' | tr '\n' ' ' | sed 's/^/PROBE env-diff: /'; echo
+          LABEL=via-ps-parent t powershell.exe -NoProfile -Command "& powershell.exe -NoProfile -NonInteractive -Command '$CMD'"
+          LABEL=via-cmd t cmd.exe //c "powershell.exe -NoProfile -NonInteractive -Command \"$CMD\""
+          LABEL=no-MSYS-vars t env -u MSYSTEM -u MSYS -u TERM -u SHELL -u SHLVL -u PWD -u OLDPWD "${PS[@]}" "$CMD"
+          LABEL=no-TMP t env -u TMP -u TEMP "${PS[@]}" "$CMD"
+          LABEL=py-launch t "$(command -v python || echo python)" -c "import subprocess,time;t=time.time();subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command','$CMD']);print(round(time.time()-t,1))"
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
