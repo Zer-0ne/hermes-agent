@@ -111,28 +111,21 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
 
-      - name: PROBE fresh-profile PowerShell cost (diagnostic, do not merge)
+      - name: PROBE PowerShell launch cost from bash (diagnostic, do not merge)
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: bash
         run: |
-          function Run($label, [hashtable]$extra) {
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = 'powershell.exe'
-            $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Command Get-ChildItem | Out-Null; exit 0"'
-            $psi.UseShellExecute = $false
-            foreach ($k in $extra.Keys) { $psi.EnvironmentVariables[$k] = $extra[$k] }
-            $t = [Diagnostics.Stopwatch]::StartNew(); $p = [Diagnostics.Process]::Start($psi); $p.WaitForExit(); $t.Stop()
-            Write-Host ("PROBE {0} {1:N1}s rc={2}" -f $label, $t.Elapsed.TotalSeconds, $p.ExitCode)
-          }
-          function Fresh() { $d = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N')); New-Item -ItemType Directory $d | Out-Null; $d }
-          Run 'warm-up' @{}
-          Run 'same-env' @{}
-          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-USERPROFILE#$i" @{ USERPROFILE = $d; HOME = $d } }
-          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-LOCALAPPDATA#$i" @{ LOCALAPPDATA = $d } }
-          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-TEMP#$i" @{ TEMP = $d; TMP = $d } }
-          $shared = Fresh
-          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-all+shared-analysis-cache#$i" @{ USERPROFILE = $d; HOME = $d; LOCALAPPDATA = $d; TEMP = $d; TMP = $d; PSModuleAnalysisCachePath = (Join-Path $shared 'cache') } }
-          foreach ($i in 1, 2) { $d = Fresh; Run "fresh-all#$i" @{ USERPROFILE = $d; HOME = $d; LOCALAPPDATA = $d; TEMP = $d; TMP = $d } }
+          t() { local s=$(date +%s.%N); "$@" > /dev/null 2>&1; echo "PROBE $LABEL rc=$? $(echo "$(date +%s.%N) - $s" | bc)s"; }
+          echo "PROBE PSModulePath=$PSModulePath"
+          echo "PROBE LOCALAPPDATA=$LOCALAPPDATA"
+          ls "$LOCALAPPDATA/Microsoft/Windows/PowerShell" 2>&1 | sed 's/^/PROBE ls-before: /'
+          PS='powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command'
+          for i in 1 2 3; do LABEL="bash-env#$i" t $PS 'Get-Command Get-ChildItem | Out-Null'; done
+          ls -la "$LOCALAPPDATA/Microsoft/Windows/PowerShell" 2>&1 | sed 's/^/PROBE ls-after: /'
+          for i in 1 2; do LABEL="no-PSModulePath#$i" t env -u PSModulePath $PS 'Get-Command Get-ChildItem | Out-Null'; done
+          for i in 1 2; do LABEL="bash-env-again#$i" t $PS 'Get-Command Get-ChildItem | Out-Null'; done
+          for i in 1 2; do LABEL="exit0#$i" t $PS 'exit 0'; done
+          d=$(mktemp -d); for i in 1 2; do LABEL="pytest-like-HOME#$i" HOME=$d USERPROFILE=$(cygpath -w $d) t $PS 'Get-Command Get-ChildItem | Out-Null'; done
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
