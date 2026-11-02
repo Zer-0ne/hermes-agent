@@ -111,36 +111,34 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
 
-      - name: PROBE PowerShell env bisect from Python (diagnostic, do not merge)
+      - name: PROBE PowerShell under the test runner's env -i (diagnostic, do not merge)
         if: runner.os == 'Windows' && runner.arch == 'ARM64'
-        shell: powershell
+        shell: bash
         run: |
-          Write-Host "PROBE ProgramFiles modules: $((Get-ChildItem 'C:\Program Files\WindowsPowerShell\Modules' -Directory).Name -join ',')"
-          $probe = Join-Path $env:RUNNER_TEMP 'psprobe.py'
-          @'
-          import os, subprocess, sys, tempfile, time
-          base = dict(os.environ)
-          sysroot = base.get("SystemRoot", r"C:\Windows")
-          mini_path = ";".join([sysroot + r"\system32", sysroot, sysroot + r"\System32\Wbem", sysroot + r"\System32\WindowsPowerShell\v1.0"])
-          sys_mods = sysroot + r"\system32\WindowsPowerShell\v1.0\Modules"
-          shared = os.path.join(tempfile.gettempdir(), "shared-analysis-cache")
-          def run(label, env, cmd="Get-ChildItem . | Out-Null"):
+          cat > "$RUNNER_TEMP/psprobe.py" <<'PY'
+          import os, subprocess, sys, time
+          full = dict(os.environ)
+          keep = "PATH HOME USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT TEMP TMP ComSpec PATHEXT PROGRAMFILES ProgramFiles PROGRAMDATA ProgramData".split()
+          up = {k.upper(): k for k in full}
+          runner = {up[k.upper()]: full[up[k.upper()]] for k in keep if k.upper() in up}
+          sysroot = full.get("SystemRoot") or full.get("SYSTEMROOT")
+          ps = sysroot + r"\System32\WindowsPowerShell\v1.0\powershell.exe"
+          def run(label, env):
               t = time.time()
-              r = subprocess.run([sysroot + r"\System32\WindowsPowerShell\v1.0\powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd], env=env, capture_output=True, text=True)
-              print(f"PROBE {label} rc={r.returncode} {time.time() - t:.1f}s {(r.stdout + r.stderr).strip()[:160]!r}", flush=True)
-          print("PROBE path-entries", len(base["PATH"].split(";")), flush=True)
-          run("baseline#1", base); run("baseline#2", base)
-          run("mini-PATH#1", {**base, "PATH": mini_path}); run("mini-PATH#2", {**base, "PATH": mini_path})
-          run("sys-PSModulePath#1", {**base, "PSModulePath": sys_mods}); run("sys-PSModulePath#2", {**base, "PSModulePath": sys_mods})
-          run("both", {**base, "PATH": mini_path, "PSModulePath": sys_mods})
-          run("shared-cache#1", {**base, "PSModuleAnalysisCachePath": shared}); run("shared-cache#2", {**base, "PSModuleAnalysisCachePath": shared})
-          run("trace", base, "$t=[Diagnostics.Stopwatch]::StartNew(); Get-Command Get-ChildItem | Out-Null; 'gcm ' + $t.ElapsedMilliseconds; $t.Restart(); Get-ChildItem . | Out-Null; 'gci ' + $t.ElapsedMilliseconds")
-          run("timestamps", base, "(Get-Module -ListAvailable | Measure-Object).Count")
-          '@ -replace '(?m)^          ', '' | Set-Content -Encoding UTF8 $probe
-          $py = (Get-Command python -ErrorAction SilentlyContinue).Source
-          if (-not $py) { $py = (Get-Command py).Source }
-          Write-Host "PROBE python=$py"
-          & $py $probe 2>&1 | Write-Host
+              r = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Get-ChildItem . | Out-Null"], env=env, capture_output=True, text=True)
+              print(f"PROBE {label} rc={r.returncode} {time.time() - t:.1f}s {(r.stdout + r.stderr).strip()[:120]!r}", flush=True)
+          def plus(*names):
+              return {**runner, **{up[n.upper()]: full[up[n.upper()]] for n in names if n.upper() in up}}
+          print("PROBE dropped:", sorted(set(full) - set(runner)), flush=True)
+          run("full#1", full); run("full#2", full)
+          run("runner#1", runner); run("runner#2", runner)
+          run("runner+PSModulePath#1", plus("PSModulePath")); run("runner+PSModulePath#2", plus("PSModulePath"))
+          run("runner+arch#1", plus("PROCESSOR_ARCHITECTURE", "windir", "SystemDrive", "OS", "NUMBER_OF_PROCESSORS")); run("runner+arch#2", plus("PROCESSOR_ARCHITECTURE", "windir", "SystemDrive", "OS", "NUMBER_OF_PROCESSORS"))
+          run("runner+user#1", plus("USERNAME", "USERDOMAIN", "COMPUTERNAME", "ALLUSERSPROFILE", "PUBLIC")); run("runner+user#2", plus("USERNAME", "USERDOMAIN", "COMPUTERNAME", "ALLUSERSPROFILE", "PUBLIC"))
+          run("runner+all-but-PSModulePath", {k: v for k, v in full.items() if k.upper() != "PSMODULEPATH"})
+          run("runner+all-but-PSModulePath#2", {k: v for k, v in full.items() if k.upper() != "PSMODULEPATH"})
+          PY
+          python "$RUNNER_TEMP/psprobe.py"
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
