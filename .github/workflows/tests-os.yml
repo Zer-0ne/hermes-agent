@@ -111,32 +111,42 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
 
-      - name: PROBE PowerShell under the test runner's env -i (diagnostic, do not merge)
+      - name: PROBE capture the PowerShell-step env (diagnostic, do not merge)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: powershell
+        run: |
+          $h = @{}; Get-ChildItem env: | ForEach-Object { $h[$_.Name] = $_.Value }
+          $h | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $env:RUNNER_TEMP 'ps-env.json')
+          $t = Measure-Command { powershell.exe -NoProfile -NonInteractive -Command 'Get-ChildItem . | Out-Null' }
+          Write-Host ("PROBE warm-from-ps-step {0:N1}s" -f $t.TotalSeconds)
+          $t = Measure-Command { powershell.exe -NoProfile -NonInteractive -Command 'Get-ChildItem . | Out-Null' }
+          Write-Host ("PROBE warm-from-ps-step#2 {0:N1}s" -f $t.TotalSeconds)
+
+      - name: PROBE launch variants from bash (diagnostic, do not merge)
         if: runner.os == 'Windows' && runner.arch == 'ARM64'
         shell: bash
         run: |
           cat > "$RUNNER_TEMP/psprobe.py" <<'PY'
-          import os, subprocess, sys, time
+          import json, os, subprocess, sys, time
+          ps_env = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "ps-env.json"), encoding="utf-8-sig"))
           full = dict(os.environ)
-          keep = "PATH HOME USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT TEMP TMP ComSpec PATHEXT PROGRAMFILES ProgramFiles PROGRAMDATA ProgramData".split()
-          up = {k.upper(): k for k in full}
-          runner = {up[k.upper()]: full[up[k.upper()]] for k in keep if k.upper() in up}
           sysroot = full.get("SystemRoot") or full.get("SYSTEMROOT")
           ps = sysroot + r"\System32\WindowsPowerShell\v1.0\powershell.exe"
-          def run(label, env):
+          def run(label, env, **kw):
               t = time.time()
-              r = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Get-ChildItem . | Out-Null"], env=env, capture_output=True, text=True)
+              r = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Get-ChildItem . | Out-Null"], env=env, capture_output=True, text=True, **kw)
               print(f"PROBE {label} rc={r.returncode} {time.time() - t:.1f}s {(r.stdout + r.stderr).strip()[:120]!r}", flush=True)
-          def plus(*names):
-              return {**runner, **{up[n.upper()]: full[up[n.upper()]] for n in names if n.upper() in up}}
-          print("PROBE dropped:", sorted(set(full) - set(runner)), flush=True)
-          run("full#1", full); run("full#2", full)
-          run("runner#1", runner); run("runner#2", runner)
-          run("runner+PSModulePath#1", plus("PSModulePath")); run("runner+PSModulePath#2", plus("PSModulePath"))
-          run("runner+arch#1", plus("PROCESSOR_ARCHITECTURE", "windir", "SystemDrive", "OS", "NUMBER_OF_PROCESSORS")); run("runner+arch#2", plus("PROCESSOR_ARCHITECTURE", "windir", "SystemDrive", "OS", "NUMBER_OF_PROCESSORS"))
-          run("runner+user#1", plus("USERNAME", "USERDOMAIN", "COMPUTERNAME", "ALLUSERSPROFILE", "PUBLIC")); run("runner+user#2", plus("USERNAME", "USERDOMAIN", "COMPUTERNAME", "ALLUSERSPROFILE", "PUBLIC"))
-          run("runner+all-but-PSModulePath", {k: v for k, v in full.items() if k.upper() != "PSMODULEPATH"})
-          run("runner+all-but-PSModulePath#2", {k: v for k, v in full.items() if k.upper() != "PSMODULEPATH"})
+          diff = sorted(k for k in set(ps_env) | set(full) if ps_env.get(k) != full.get(k))
+          for k in diff:
+              print(f"PROBE envdiff {k}: ps={str(ps_env.get(k))[:150]!r} bash={str(full.get(k))[:150]!r}", flush=True)
+          run("bash-env", full)
+          run("ps-step-env#1", ps_env); run("ps-step-env#2", ps_env)
+          run("bash-env+stdin-devnull", full, stdin=subprocess.DEVNULL)
+          run("bash-env+new-console", full, creationflags=subprocess.CREATE_NEW_CONSOLE)
+          run("bash-env+no-window", full, creationflags=subprocess.CREATE_NO_WINDOW)
+          run("bash-env+detached", full, creationflags=subprocess.DETACHED_PROCESS)
+          run("bash-env+new-group", full, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+          run("bash-env+breakaway", full, creationflags=0x01000000)
           PY
           python "$RUNNER_TEMP/psprobe.py"
 
