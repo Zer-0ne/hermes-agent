@@ -115,28 +115,25 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          $s = Get-MpComputerStatus -ErrorAction SilentlyContinue
-          if ($s) { Write-Host "PROBE status RTP=$($s.RealTimeProtectionEnabled) AMSI=$($s.AMServiceEnabled) IOAV=$($s.IoavProtectionEnabled) Tamper=$($s.IsTamperProtected) Behavior=$($s.BehaviorMonitorEnabled)" } else { Write-Host "PROBE no Defender" }
-          $p = Get-MpPreference -ErrorAction SilentlyContinue
-          if ($p) { Write-Host "PROBE pref DisableScriptScanning=$($p.DisableScriptScanning) Excl=$($p.ExclusionPath -join ',')" }
-          $src = Join-Path $env:GITHUB_WORKSPACE 'scripts\install.ps1'
+          $src = Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'scripts\install.ps1')
           function Probe($label) {
             foreach ($shell in @('powershell', 'pwsh')) {
-              foreach ($i in 1, 2) {
+              foreach ($kind in 'unique', 'unique', 'same') {
+                if ($kind -eq 'same') { $body = $script:last } else { $body = $src + "`n# " + [guid]::NewGuid().ToString('N') + "`n"; $script:last = $body }
                 $copy = Join-Path $env:RUNNER_TEMP ("probe-" + [guid]::NewGuid().ToString('N') + '.ps1')
-                Copy-Item $src $copy
+                Set-Content -Path $copy -Value $body -Encoding UTF8
                 $t = Measure-Command { & $shell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "`$ErrorActionPreference='Stop'; . '$copy'" | Out-Null }
-                Write-Host ("PROBE {0} {1} fresh-copy#{2} {3:N1}s" -f $label, $shell, $i, $t.TotalSeconds)
+                Write-Host ("PROBE {0} {1} {2} {3:N1}s" -f $label, $shell, $kind, $t.TotalSeconds)
               }
-              $t = Measure-Command { & $shell -NoProfile -NonInteractive -Command "exit 0" | Out-Null }
-              Write-Host ("PROBE {0} {1} bare-start {2:N1}s" -f $label, $shell, $t.TotalSeconds)
             }
           }
           Probe 'default'
-          try { Set-MpPreference -DisableScriptScanning $true -ErrorAction Stop; Write-Host 'PROBE DisableScriptScanning set' } catch { Write-Host "PROBE DisableScriptScanning refused: $($_.Exception.Message)" }
+          Probe 'default-again'
+          try { Set-MpPreference -DisableScriptScanning $true -ErrorAction Stop; Write-Host "PROBE DisableScriptScanning=$((Get-MpPreference).DisableScriptScanning)" } catch { Write-Host "PROBE DisableScriptScanning refused: $($_.Exception.Message)" }
+          Probe 'scriptscan-off'
+          Set-MpPreference -DisableScriptScanning $false
           try { Add-MpPreference -ExclusionProcess 'powershell.exe','pwsh.exe' -ErrorAction Stop; Write-Host 'PROBE process exclusion set' } catch { Write-Host "PROBE process exclusion refused: $($_.Exception.Message)" }
-          try { Add-MpPreference -ExclusionPath $env:RUNNER_TEMP -ErrorAction Stop; Write-Host 'PROBE path exclusion set' } catch { Write-Host "PROBE path exclusion refused: $($_.Exception.Message)" }
-          Probe 'after-prefs'
+          Probe 'procexcl-only'
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
