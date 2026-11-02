@@ -111,21 +111,30 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
 
-      - name: PROBE PowerShell launch cost from bash (diagnostic, do not merge)
+      - name: PROBE PowerShell launch cost from bash v2 (diagnostic, do not merge)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          t() { local s=$(date +%s.%N); "$@" > /dev/null 2>&1; echo "PROBE $LABEL rc=$? $(echo "$(date +%s.%N) - $s" | bc)s"; }
-          echo "PROBE PSModulePath=$PSModulePath"
-          echo "PROBE LOCALAPPDATA=$LOCALAPPDATA"
-          ls "$LOCALAPPDATA/Microsoft/Windows/PowerShell" 2>&1 | sed 's/^/PROBE ls-before: /'
+          t() { local s=$(date +%s%N); "$@" > "$RUNNER_TEMP/probe.out" 2>&1; local rc=$?; echo "PROBE $LABEL rc=$rc $(( ($(date +%s%N) - s) / 1000000 ))ms $(tr -d '\r' < "$RUNNER_TEMP/probe.out" | tr '\n' '|' | cut -c1-300)"; }
           PS='powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command'
-          for i in 1 2 3; do LABEL="bash-env#$i" t $PS 'Get-Command Get-ChildItem | Out-Null'; done
-          ls -la "$LOCALAPPDATA/Microsoft/Windows/PowerShell" 2>&1 | sed 's/^/PROBE ls-after: /'
-          for i in 1 2; do LABEL="no-PSModulePath#$i" t env -u PSModulePath $PS 'Get-Command Get-ChildItem | Out-Null'; done
-          for i in 1 2; do LABEL="bash-env-again#$i" t $PS 'Get-Command Get-ChildItem | Out-Null'; done
-          for i in 1 2; do LABEL="exit0#$i" t $PS 'exit 0'; done
-          d=$(mktemp -d); for i in 1 2; do LABEL="pytest-like-HOME#$i" HOME=$d USERPROFILE=$(cygpath -w $d) t $PS 'Get-Command Get-ChildItem | Out-Null'; done
+          CMD='Get-Command Get-ChildItem | Out-Null'
+          LABEL=effective-path t $PS '$env:PSModulePath'
+          LABEL=baseline t $PS "$CMD"
+          SYS='C:\Windows\system32\WindowsPowerShell\v1.0\Modules'
+          LABEL=sys-only#1 PSModulePath="$SYS" t $PS "$CMD"
+          LABEL=sys-only#2 PSModulePath="$SYS" t $PS "$CMD"
+          LABEL=sys-only-effective PSModulePath="$SYS" t $PS '$env:PSModulePath'
+          LABEL=no-az#1 PSModulePath="$(echo "$PSModulePath" | tr ';' '\n' | grep -vi 'Modules\\\\*az_\|SQL Server' | paste -sd';')" t $PS "$CMD"
+          LABEL=no-az-effective PSModulePath="$(echo "$PSModulePath" | tr ';' '\n' | grep -vi 'Modules\\\\*az_\|SQL Server' | paste -sd';')" t $PS '$env:PSModulePath'
+          LABEL=no-az#2 PSModulePath="$(echo "$PSModulePath" | tr ';' '\n' | grep -vi 'Modules\\\\*az_\|SQL Server' | paste -sd';')" t $PS "$CMD"
+          C="$(cygpath -w "$RUNNER_TEMP")\\ps-analysis-cache"
+          LABEL=cache-path#1 PSModuleAnalysisCachePath="$C" t $PS "$CMD"
+          ls -la "$RUNNER_TEMP" | grep -i analysis | sed 's/^/PROBE cache-file: /'
+          LABEL=cache-path#2 PSModuleAnalysisCachePath="$C" t $PS "$CMD"
+          LABEL=explicit-import t $PS 'Import-Module Microsoft.PowerShell.Management; Get-ChildItem . | Out-Null'
+          LABEL=cmdlet-only t $PS 'Get-ChildItem . | Out-Null'
+          LABEL=pwsh t pwsh.exe -NoProfile -NonInteractive -Command "$CMD"
+          LABEL=pwsh#2 t pwsh.exe -NoProfile -NonInteractive -Command "$CMD"
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
